@@ -4,6 +4,71 @@ import re
 from pathlib import Path
 import yaml
 from typing import Dict, Union
+import referia as rf
+import pandas as pd
+
+def generate_thesis_config(data, index: str) -> Dict:
+    """Generate thesis configuration from Referia data."""
+    config = {}
+    
+    # Map of section names to their Referia column prefixes
+    section_mappings = {
+        'abstract': 'Abstract',
+        'acknowledgments': 'Acknowledgments',
+        'toc': 'ToC',
+        'prologue': 'Prologue',
+        'epilogue': 'Epilogue',
+        'references': 'Ref',
+        'appendix': 'App',
+        'index': 'Index'
+    }
+    
+    # Add chapter configurations
+    for i in range(1, 13):  # Chapters 1-12
+        chapter_key = f'chapter_{i}'
+        prefix = f'Ch{i}'
+        present = data.at[index, f'{prefix}Present']
+        if pd.notna(present) and present:
+            try:
+                config[chapter_key] = {
+                    'start_page': int(data.at[index, f'{prefix}FP']),
+                    'end_page': int(data.at[index, f'{prefix}LP']),
+                    'roman': False
+                }
+            except ValueError:
+                raise ValueError(f"Invalid page numbers for Chapter {i} (Present={present}). "
+                               f"Expected integers for start page ({data.at[index, f'{prefix}FP']}) "
+                               f"and end page ({data.at[index, f'{prefix}LP']})")
+    # Add other sections
+    for config_key, prefix in section_mappings.items():
+        present = data.at[index, f'{prefix}Present']
+        if pd.notna(present) and present:
+            config[config_key] = {
+                'start_page': int(data.at[index, f'{prefix}FP']),
+                'end_page': int(data.at[index, f'{prefix}LP']),
+                'roman': config_key in ['abstract', 'acknowledgments', 'toc']  # Front matter uses roman numerals
+            }
+    return config
+
+def split_pdf(pdf_path: str, output_dir: str, config: Dict):
+    """Split PDF into sections based on configuration."""
+    reader = PyPDF2.PdfReader(os.path.join(os.path.expanduser("~/Documents"), pdf_path))
+    
+    for section_name, section_config in config.items():
+        writer = PyPDF2.PdfWriter()
+        start_page = section_config['start_page'] - 1  # Convert to 0-based index
+        end_page = section_config['end_page']
+        
+        for page_num in range(start_page, end_page):
+            if page_num < len(reader.pages):
+                writer.add_page(reader.pages[page_num])
+        
+        # Create output directory if it doesn't exist
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        output_path = os.path.join(output_dir, f"{section_name}.pdf")
+        
+        with open(output_path, 'wb') as output_file:
+            writer.write(output_file)
 
 def wrap_text(text, width=80):
     """Wrap text to specified width while preserving paragraphs."""
@@ -49,26 +114,6 @@ def clean_text(text):
     text = re.sub(r'\s+([.,!?;:])', r'\1', text)
     # Wrap text to 80 characters
     text = wrap_text(text.strip())
-    return text
-
-def extract_toc_content(text):
-    """Extract section titles and page numbers from TOC text."""
-    # Common patterns in TOCs
-    toc_pattern = re.compile(r'^(.*?)[.…\s]+(\d+)$', re.MULTILINE)
-    
-    # Find all matches
-    matches = toc_pattern.findall(text)
-    
-    # Convert to markdown table
-    if matches:
-        table = "| Section | Page |\n|---------|------|\n"
-        for section, page in matches:
-            # Clean the section title
-            section = section.strip()
-            # Escape any pipe characters in the section title
-            section = section.replace('|', '\\|')
-            table += f"| {section} | {page} |\n"
-        return table
     return text
 
 class PageNumbering:
@@ -156,7 +201,7 @@ def pdf_to_txt(pdf_path, output_dir, section_configs: Dict[str, PageNumbering]):
     except Exception as e:
         print(f"Error processing {pdf_path}: {str(e)}")
         return None
-
+    
 def process_directory(input_dir, output_dir, config_path):
     """Process all PDF files in a directory using the specified configuration."""
     # Load section configurations
@@ -172,9 +217,36 @@ def process_directory(input_dir, output_dir, config_path):
         else:
             print(f"Failed to convert {pdf_file}")
 
-if __name__ == "__main__":
-    input_directory = "pdf_chapters"
-    output_directory = "txt_output"
-    config_file = "thesis_config.yaml"
+def main():
+    """Main function to process thesis using Referia data."""
+    # Load Referia data
+    interface = rf.config.interface.Interface.from_file(
+        directory=".",
+        user_file="_referia.yml"
+    )
+    data = rf.assess.data.CustomDataFrame.from_flow(interface)
+    index = "Datta_Siddhartha"
     
-    process_directory(input_directory, output_directory, config_file)
+    # Generate configuration
+    config = generate_thesis_config(data, index)
+    
+    # Save configuration to YAML
+    config_path = "thesis_config.yaml"
+    with open(config_path, 'w') as f:
+        yaml.dump(config, f)
+    
+    # Get thesis PDF path from Referia data
+    pdf_path = data.at[index, 'ThesisPDF']
+    
+    # Create output directories
+    pdf_output_dir = "pdf_chapters"
+    txt_output_dir = "txt_output"
+    
+    # Split PDF into sections
+    split_pdf(pdf_path, pdf_output_dir, config)
+    
+    # Process each section to text
+    process_directory(pdf_output_dir, txt_output_dir, config_path)
+
+if __name__ == "__main__":
+    main()
